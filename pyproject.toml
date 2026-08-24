@@ -1,0 +1,7 @@
+[project]
+name = "smart-travel-planner-langgraph-multi-agent-system"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "uvicorn>=0.52.1",
+]
