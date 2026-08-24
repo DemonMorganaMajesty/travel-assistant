@@ -1,4 +1,128 @@
-# Smart‑Travel‑Planner 智能旅行规划后端
-> AI Agent 智能旅行规划服务，基于 FastAPI + LangGraph 构建 Supervisor‑Worker‑Critic 多智能体架构，面向用户实现多城市旅行行程智能生成，输出多套差异化备选行程方案，支持会话历史持久化管理、未登录匿名访问降级、景点TSP游览路径优化、地图POI查询、天气后勤信息搜集，提供SSE流式输出Agent执行中间状态。
+# Smart Travel Planner - LangGraph Multi-Agent System
 
-项目采用LangGraph `StateGraph` 编排完整Agent业务流程，划分 Supervisor调度节点、Research信息搜集Worker、Logistics后勤Worker、Planning行程编排Worker、Critic方案校验节点；Worker内部封装自研`run_react_loop`本地ReAct循环完成多轮工具调用，避免每一步工具调用都触发Graph节点跳转；通过AgentState维护全局上下文、用户出行参数、消息列表、重试计数器，利用条件分支路由流转任务，配置最大Worker重试次数、ReAct迭代上限双重防护，防止智能体出现图层面与工具调用层面的无限死循环。检索层实现混合RAG检索，基于ChromaDB持久化向量知识库，融合向量语义召回与jieba分词BM25关键词召回，使用RRF reciprocal rank fusion算法合并多路候选文档，接入BGE‑reranker重排模型做结果精排；当BM25、重排模型依赖缺失时自动降级为纯向量检索，保障主业务链路不中断。针对高德地图API、Tavily网页搜索实现向量缓存集合，支持精确字符串匹配 + 余弦相似度模糊匹配，搭配分类TTL过期策略，复用历史第三方接口返回结果，减少外部API请求频次，规避高德CUQPS限流风险；封装httpx异步高德服务，实现同步/异步双接口，信号量控制并发请求，实现指数退避+随机抖动重试逻辑，区分密钥错误、内容风控等致命业务错误，对该类错误跳过重试逻辑，仅对网络瞬时异常执行重试。工具输出层实现健壮的JSON提取解析工具，处理LLM输出Markdown代码块、尾随逗号、混杂多余自然语言等问题，依靠括号深度计数完成JSON片段截取，搭配Pydantic模型完成结构化字段校验；Critic节点采用双层校验策略：本地快速结构化校验优先过滤格式错误，再调用LLM完成语义业务校验，校验失败回填审查反馈，交由Supervisor重新调度对应Worker重做行程。路径规划模块集成Google OR‑Tools实现TSP旅行商求解，对景点坐标计算最优游览顺序，同时实现贪心最近邻算法作为降级兜底，在OR‑Tools依赖缺失或求解失败时保障功能可用。服务工程层面实现可选JWT鉴权，支持游客匿名模式与登录模式，使用bcrypt完成密码哈希存储；实现内存滑动窗口接口限流、异步后台任务管理、幂等任务ID、全局统一异常处理器；使用SQLite存储用户会话、历史行程记录，实现会话新建、删除、置顶等功能；整体大量引入降级策略，第三方组件、工具调用异常不会直接中断主流程，优先返回部分可用结果，适配原型部署与演示场景。
+基于 **LangChain + LangGraph** 的工业级多 Agent 旅行规划系统，采用 Supervisor-Worker-Critic 架构模式。
+
+## 架构亮点
+
+### Supervisor-Worker-Critic 多 Agent 协作
+
+```
+Supervisor (路由决策)
+  -> ResearchWorker  (景点搜索 + RAG + 网页搜索)
+  -> LogisticsWorker (天气 + 酒店 + 路线 + 美食)
+  -> PlanningWorker  (预算 + 每日行程编排)
+  -> Critic           (质量审查)
+  -> pass -> 输出 / fail -> 重新调度
+```
+
+### 核心技术栈
+
+| 技术 | 用途 | 业务驱动 |
+|------|------|---------|
+| LangGraph | 多 Agent 协作编排 | Supervisor-Worker-Critic 模式 |
+| LangChain Tools | 工具定义与调用 | `@tool` 装饰器统一工具接口 |
+| ChromaDB | RAG 向量检索 | 旅行攻略/历史文化知识库 |
+| SQLite | 用户偏好记忆 | 记住偏好、跨会话复用 |
+| FastAPI SSE | 流式推送 | 前端实时展示 Agent 思考过程 |
+| Pytest | 单元测试 | 核心模块质量保障 |
+
+### 工具矩阵
+
+| 工具 | 业务场景 |
+|------|---------|
+| 高德地图 MCP | POI 搜索、路线规划、天气查询 |
+| Tavily Search | 搜索景点门票/开放时间/最新攻略 |
+| Fetch | 抓取攻略全文、交通时刻表 |
+| RAG (ChromaDB) | 历史文化景点深度知识检索 |
+| SQLite Memory | Agent 自主存取用户偏好 |
+
+### 智能伴游对话机器人
+
+行程生成后，用户在结果页可以通过聊天窗口与 Agent 对话，基于行程上下文回答问题、调整计划。
+
+## 项目结构
+
+```
+backend/
+  app/
+    agent_graph/          # LangGraph 核心
+      state.py            # AgentState 类型定义
+      supervisor.py       # Supervisor 路由节点
+      workers/            # Research / Logistics / Planning
+      critic.py           # Critic 审查节点
+      graph.py            # StateGraph 定义+编译
+      companion.py        # 智能伴游对话 Agent
+    tools/                # 工具层
+      amap_tools.py       # 高德 MCP 工具封装
+      tavily_tools.py     # Tavily 搜索
+      fetch_tools.py      # Fetch 网页抓取
+      rag_tools.py        # RAG 检索 (ChromaDB)
+      memory_tools.py     # SQLite 记忆工具
+    rag/                  # RAG 系统
+      vector_store.py     # ChromaDB 管理
+      embeddings.py       # Embedding 封装
+      loader.py           # 文档加载/分块
+      data/               # 知识库原始文档
+    api/                  # API 路由
+    models/               # 数据模型
+  tests/                  # 测试
+frontend/
+  src/
+    views/                # Home.vue / Result.vue
+    components/
+      ChatWidget.vue      # 伴游聊天组件
+    services/
+      api.ts              # SSE 客户端
+```
+
+## 快速开始
+
+### 后端
+
+```bash
+cd backend
+python -m venv venv
+venv\Scripts\activate   # Windows
+pip install -r requirements.txt
+python run.py
+```
+
+### 前端
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+### 环境变量 (.env)
+
+```env
+LLM_MODEL_ID=deepseek-chat
+LLM_API_KEY=your_api_key
+LLM_BASE_URL=https://api.deepseek.com
+AMAP_API_KEY=your_amap_key
+TAVILY_API_KEY=your_tavily_key   # 可选
+```
+
+### 运行测试
+
+```bash
+cd backend
+pytest tests/ -v
+```
+
+## 为什么是 3 个 Worker？
+
+不是简单地拆分任务。酒店、交通、美食都依赖景点位置，拆细后无法并行。3 个 Worker 基于真实的依赖链分析，每个 Worker 有完整的业务闭环：
+
+- **ResearchWorker**: "玩什么" - 景点搜索 + 历史文化知识补充
+- **LogisticsWorker**: "怎么支撑" - 天气/酒店/路线/美食 (依赖阶段1的结果)
+- **PlanningWorker**: "怎么编排" - 预算/时间/每日行程 (依赖阶段1+2)
+
+## 设计决策
+
+- **不用 Neo4j**: 数据规模小(几十个景点)，向量检索+高德 API 已覆盖
+- **不用 Redis**: SQLite 足够，单用户场景无需缓存中间件
+- **不用 Puppeteer**: Fetch 已能解决网页抓取需求
+- **不用 Docker**: 本地开发不需要，生产可容器化
