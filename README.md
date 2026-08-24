@@ -1,4 +1,4 @@
-# Smart Travel Planner - LangGraph Multi-Agent System
+# travel-assistant
 
 基于 **LangChain + LangGraph** 的工业级多 Agent 旅行规划系统，采用 Supervisor-Worker-Critic 架构模式。
 
